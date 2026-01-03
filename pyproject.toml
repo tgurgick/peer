@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "peer"
+version = "0.1.0"
+description = "Activity logging assistant for LLM context and training data"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [
+    { name = "Trevor Gurgick" }
+]
+dependencies = [
+    "pynput>=1.7.6",
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-Cocoa>=10.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pystray>=0.19.0",
+    "Pillow>=10.0.0",
+    "openai>=1.0.0",
+    "anthropic>=0.18.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+peer = "peer.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["peer"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
