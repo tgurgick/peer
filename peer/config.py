@@ -1,11 +1,33 @@
 """Configuration management for Peer."""
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Set
 
 from dotenv import load_dotenv
+
+
+# Default apps to never log (privacy-sensitive)
+DEFAULT_BLOCKED_APPS: Set[str] = {
+    "1Password",
+    "Keychain Access",
+    "LastPass",
+    "Bitwarden",
+    "Dashlane",
+    "Keeper",
+    "KeePassXC",
+}
+
+# Default bundle IDs to never log
+DEFAULT_BLOCKED_BUNDLES: Set[str] = {
+    "com.1password.1password",
+    "com.apple.keychainaccess",
+    "com.lastpass.LastPass",
+    "com.bitwarden.desktop",
+    "com.dashlane.Dashlane",
+}
 
 
 @dataclass
@@ -18,11 +40,56 @@ class Config:
     summary_interval: int = 300  # seconds
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
+    blocked_apps: Set[str] = field(default_factory=lambda: DEFAULT_BLOCKED_APPS.copy())
+    blocked_bundles: Set[str] = field(default_factory=lambda: DEFAULT_BLOCKED_BUNDLES.copy())
+    afk_timeout: int = 180  # seconds before considered AFK
 
     def __post_init__(self):
         self.data_dir = Path(self.data_dir)
         self.screenshots_dir.mkdir(parents=True, exist_ok=True)
         self.exports_dir.mkdir(parents=True, exist_ok=True)
+        self._load_blocklist()
+
+    def _load_blocklist(self) -> None:
+        """Load user blocklist from config file if it exists."""
+        blocklist_file = self.data_dir / "blocklist.json"
+        if blocklist_file.exists():
+            try:
+                with open(blocklist_file) as f:
+                    data = json.load(f)
+                    if "apps" in data:
+                        self.blocked_apps.update(data["apps"])
+                    if "bundles" in data:
+                        self.blocked_bundles.update(data["bundles"])
+            except Exception:
+                pass  # Ignore invalid config
+
+    def save_blocklist(self) -> None:
+        """Save current blocklist to config file."""
+        blocklist_file = self.data_dir / "blocklist.json"
+        with open(blocklist_file, "w") as f:
+            json.dump({
+                "apps": sorted(self.blocked_apps),
+                "bundles": sorted(self.blocked_bundles),
+            }, f, indent=2)
+
+    def is_app_blocked(self, app_name: str, bundle_id: Optional[str] = None) -> bool:
+        """Check if an app should be blocked from logging."""
+        if app_name in self.blocked_apps:
+            return True
+        if bundle_id and bundle_id in self.blocked_bundles:
+            return True
+        return False
+
+    def block_app(self, app_name: str) -> None:
+        """Add an app to the blocklist."""
+        self.blocked_apps.add(app_name)
+        self.save_blocklist()
+
+    def unblock_app(self, app_name: str) -> None:
+        """Remove an app from the blocklist."""
+        self.blocked_apps.discard(app_name)
+        self.save_blocklist()
 
     @property
     def db_path(self) -> Path:
@@ -53,6 +120,7 @@ class Config:
             summary_interval=int(os.getenv("PEER_SUMMARY_INTERVAL", "300")),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            afk_timeout=int(os.getenv("PEER_AFK_TIMEOUT", "180")),
         )
 
 

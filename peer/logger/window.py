@@ -34,6 +34,7 @@ class WindowEvent:
     bundle_id: Optional[str] = None
     url: Optional[str] = None  # For browsers
     document_path: Optional[str] = None  # For document-based apps
+    is_private: bool = False  # Incognito/private browsing mode
 
     def to_dict(self) -> dict[str, Any]:
         result = {
@@ -45,6 +46,8 @@ class WindowEvent:
             result["url"] = self.url
         if self.document_path:
             result["document_path"] = self.document_path
+        if self.is_private:
+            result["is_private"] = self.is_private
         return result
 
 
@@ -55,12 +58,24 @@ class WindowLogger:
         self,
         on_event: Callable[[WindowEvent], None],
         poll_interval: float = 0.5,
+        blocked_apps: Optional[set] = None,
+        blocked_bundles: Optional[set] = None,
     ):
         self.on_event = on_event
         self.poll_interval = poll_interval
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._last_window: Optional[dict[str, str]] = None
+        self._blocked_apps = blocked_apps or set()
+        self._blocked_bundles = blocked_bundles or set()
+
+    def is_blocked(self, app_name: str, bundle_id: Optional[str]) -> bool:
+        """Check if an app is blocked from logging."""
+        if app_name in self._blocked_apps:
+            return True
+        if bundle_id and bundle_id in self._blocked_bundles:
+            return True
+        return False
 
     def start(self) -> None:
         """Start tracking window changes."""
@@ -88,7 +103,7 @@ class WindowLogger:
         then CGWindowListCopyWindowInfo for the window title.
         """
         if not MACOS_AVAILABLE:
-            return {"app": "", "title": "", "bundle_id": "", "url": None, "document_path": None}
+            return {"app": "", "title": "", "bundle_id": "", "url": None, "document_path": None, "is_private": False}
 
         try:
             # Use AppleScript to get frontmost app - most reliable method
@@ -119,9 +134,17 @@ class WindowLogger:
             # Get window title using Quartz
             window_title = self._get_window_title_for_app(app_name)
 
-            # Get URL or document path based on app type
-            url = self._get_browser_url(app_name, bundle_id)
-            document_path = self._get_document_path(app_name, bundle_id) if not url else None
+            # Check for private browsing mode
+            is_private = self._is_private_browsing(app_name, bundle_id, window_title)
+
+            # Skip URL capture for private browsing (privacy protection)
+            if is_private:
+                url = None
+                document_path = None
+            else:
+                # Get URL or document path based on app type
+                url = self._get_browser_url(app_name, bundle_id)
+                document_path = self._get_document_path(app_name, bundle_id) if not url else None
 
             return {
                 "app": app_name,
@@ -129,6 +152,7 @@ class WindowLogger:
                 "bundle_id": bundle_id,
                 "url": url,
                 "document_path": document_path,
+                "is_private": is_private,
             }
         except Exception:
             return self._get_active_window_fallback()
@@ -141,7 +165,7 @@ class WindowLogger:
             )
 
             if not window_list:
-                return {"app": "", "title": "", "bundle_id": "", "url": None, "document_path": None}
+                return {"app": "", "title": "", "bundle_id": "", "url": None, "document_path": None, "is_private": False}
 
             system_owners = {
                 "Window Server", "Dock", "SystemUIServer",
@@ -167,9 +191,16 @@ class WindowLogger:
                     except Exception:
                         pass
 
-                # Get URL or document path
-                url = self._get_browser_url(owner_name, bundle_id)
-                document_path = self._get_document_path(owner_name, bundle_id) if not url else None
+                # Check for private browsing
+                is_private = self._is_private_browsing(owner_name, bundle_id, window_title)
+
+                # Skip URL capture for private browsing
+                if is_private:
+                    url = None
+                    document_path = None
+                else:
+                    url = self._get_browser_url(owner_name, bundle_id)
+                    document_path = self._get_document_path(owner_name, bundle_id) if not url else None
 
                 return {
                     "app": owner_name,
@@ -177,11 +208,12 @@ class WindowLogger:
                     "bundle_id": bundle_id,
                     "url": url,
                     "document_path": document_path,
+                    "is_private": is_private,
                 }
 
-            return {"app": "", "title": "", "bundle_id": "", "url": None, "document_path": None}
+            return {"app": "", "title": "", "bundle_id": "", "url": None, "document_path": None, "is_private": False}
         except Exception:
-            return {"app": "", "title": "", "bundle_id": "", "url": None, "document_path": None}
+            return {"app": "", "title": "", "bundle_id": "", "url": None, "document_path": None, "is_private": False}
 
     def _get_window_title_for_app(self, app_name: str) -> str:
         """Get the window title for an app by name."""
@@ -285,6 +317,68 @@ class WindowLogger:
             pass
         return None
 
+    def _is_private_browsing(self, app_name: str, bundle_id: str, window_title: str) -> bool:
+        """Detect if browser is in private/incognito mode.
+
+        Inspired by ActivityWatch's aw-watcher-web incognito detection.
+        """
+        # Common private window title indicators
+        private_indicators = [
+            "incognito",
+            "private",
+            "inprivate",  # Edge
+            "private browsing",  # Firefox/Safari
+        ]
+
+        title_lower = window_title.lower()
+        for indicator in private_indicators:
+            if indicator in title_lower:
+                return True
+
+        # Browser-specific AppleScript detection
+        browser_private_scripts = {
+            "com.google.Chrome": '''
+                tell application "Google Chrome"
+                    if (count of windows) > 0 then
+                        return mode of front window is "incognito"
+                    end if
+                    return false
+                end tell
+            ''',
+            "com.apple.Safari": '''
+                tell application "Safari"
+                    if (count of windows) > 0 then
+                        return private browsing of front window
+                    end if
+                    return false
+                end tell
+            ''',
+            "com.brave.Browser": '''
+                tell application "Brave Browser"
+                    if (count of windows) > 0 then
+                        return mode of front window is "incognito"
+                    end if
+                    return false
+                end tell
+            ''',
+        }
+
+        script = browser_private_scripts.get(bundle_id)
+        if script:
+            try:
+                result = subprocess.run(
+                    ["osascript", "-e", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.5,
+                )
+                if result.returncode == 0:
+                    return result.stdout.strip().lower() == "true"
+            except Exception:
+                pass
+
+        return False
+
     def _is_meaningful_change(self, current: dict[str, Any], last: Optional[dict[str, Any]]) -> bool:
         """Determine if window change is meaningful (not just title flicker)."""
         if last is None:
@@ -339,18 +433,28 @@ class WindowLogger:
         while self._running:
             try:
                 current = self.get_active_window()
+                app_name = current.get("app", "")
+                bundle_id = current.get("bundle_id")
+
+                # Skip blocked apps entirely
+                if self.is_blocked(app_name, bundle_id):
+                    # Still update last_window to avoid re-logging when leaving blocked app
+                    self._last_window = current
+                    time.sleep(self.poll_interval)
+                    continue
 
                 # Check if this is a meaningful change
-                if current["app"] and self._is_meaningful_change(current, self._last_window):
+                if app_name and self._is_meaningful_change(current, self._last_window):
                     self._last_window = current
 
                     event = WindowEvent(
                         timestamp=datetime.now().isoformat(),
-                        app_name=current["app"],
+                        app_name=app_name,
                         window_title=current["title"],
-                        bundle_id=current.get("bundle_id"),
+                        bundle_id=bundle_id,
                         url=current.get("url"),
                         document_path=current.get("document_path"),
+                        is_private=current.get("is_private", False),
                     )
                     self.on_event(event)
 

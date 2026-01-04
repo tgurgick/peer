@@ -246,3 +246,210 @@ class Database:
                 "UPDATE sessions SET total_cost = total_cost + ? WHERE id = ?",
                 (cost, session_id),
             )
+
+    # --- Data Management Methods ---
+    # Inspired by ActivityWatch's data deletion capabilities
+
+    def get_all_sessions(self, limit: int = 100) -> list[Session]:
+        """Get all sessions, most recent first."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sessions ORDER BY start_time DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [Session(**dict(row)) for row in rows]
+
+    def delete_events_before(self, before_date: str) -> int:
+        """Delete all events before a given date. Returns count deleted."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM events WHERE timestamp < ?",
+                (before_date,),
+            )
+            return cursor.rowcount
+
+    def delete_events_by_app(self, app_name: str) -> int:
+        """Delete all events from a specific app. Returns count deleted."""
+        with self._get_connection() as conn:
+            # Events store app_name in the JSON data field
+            cursor = conn.execute(
+                "DELETE FROM events WHERE data LIKE ?",
+                (f'%"app_name": "{app_name}"%',),
+            )
+            return cursor.rowcount
+
+    def delete_events_by_type(self, event_type: str) -> int:
+        """Delete all events of a specific type. Returns count deleted."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM events WHERE event_type = ?",
+                (event_type,),
+            )
+            return cursor.rowcount
+
+    def delete_session(self, session_id: str, delete_events: bool = True) -> bool:
+        """Delete a session and optionally its events. Returns True if deleted."""
+        with self._get_connection() as conn:
+            if delete_events:
+                conn.execute(
+                    "DELETE FROM events WHERE session_id = ?",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM screenshots WHERE session_id = ?",
+                    (session_id,),
+                )
+            cursor = conn.execute(
+                "DELETE FROM sessions WHERE id = ?",
+                (session_id,),
+            )
+            return cursor.rowcount > 0
+
+    def redact_text_matching(self, pattern: str, replacement: str = "[REDACTED]") -> int:
+        """Redact text events matching a pattern. Returns count modified."""
+        import re
+        count = 0
+        with self._get_connection() as conn:
+            # Get all text events
+            rows = conn.execute(
+                "SELECT id, data FROM events WHERE event_type = 'text'"
+            ).fetchall()
+
+            for row in rows:
+                try:
+                    data = json.loads(row["data"])
+                    text = data.get("text", "")
+                    if re.search(pattern, text, re.IGNORECASE):
+                        data["text"] = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+                        data["redacted"] = True
+                        conn.execute(
+                            "UPDATE events SET data = ? WHERE id = ?",
+                            (json.dumps(data), row["id"]),
+                        )
+                        count += 1
+                except Exception:
+                    continue
+
+            return count
+
+    def delete_events_matching_url(self, url_pattern: str) -> int:
+        """Delete window events matching a URL pattern. Returns count deleted."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM events WHERE event_type = 'window_change' AND data LIKE ?",
+                (f'%{url_pattern}%',),
+            )
+            return cursor.rowcount
+
+    def get_stats(self) -> dict[str, Any]:
+        """Get database statistics."""
+        with self._get_connection() as conn:
+            sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            events = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            screenshots = conn.execute("SELECT COUNT(*) FROM screenshots").fetchone()[0]
+
+            # Event breakdown
+            event_types = conn.execute(
+                "SELECT event_type, COUNT(*) as count FROM events GROUP BY event_type"
+            ).fetchall()
+
+            return {
+                "sessions": sessions,
+                "events": events,
+                "screenshots": screenshots,
+                "event_breakdown": {row["event_type"]: row["count"] for row in event_types},
+            }
+
+    def merge_events(self, pulsetime: float = 30.0) -> int:
+        """Merge consecutive similar events within a time window.
+
+        Inspired by ActivityWatch's heartbeat merging pattern.
+        Merges clicks in the same app, reducing storage while preserving meaning.
+
+        Args:
+            pulsetime: Maximum seconds between events to consider them mergeable.
+
+        Returns:
+            Number of events removed through merging.
+        """
+        merged_count = 0
+
+        with self._get_connection() as conn:
+            # Get all click events ordered by session and timestamp
+            rows = conn.execute(
+                """SELECT id, timestamp, event_type, data, session_id
+                   FROM events
+                   WHERE event_type = 'click'
+                   ORDER BY session_id, timestamp"""
+            ).fetchall()
+
+            if not rows:
+                return 0
+
+            # Group consecutive clicks that can be merged
+            to_delete = []
+            to_update = []
+            i = 0
+
+            while i < len(rows):
+                base_row = rows[i]
+                base_data = json.loads(base_row["data"])
+                base_time = datetime.fromisoformat(base_row["timestamp"])
+                count = 1
+                last_time = base_time
+
+                # Look for consecutive mergeable events
+                j = i + 1
+                while j < len(rows):
+                    next_row = rows[j]
+
+                    # Must be same session
+                    if next_row["session_id"] != base_row["session_id"]:
+                        break
+
+                    next_time = datetime.fromisoformat(next_row["timestamp"])
+                    time_diff = (next_time - last_time).total_seconds()
+
+                    # Must be within pulsetime
+                    if time_diff > pulsetime:
+                        break
+
+                    # For clicks, we just count them (don't need same position)
+                    to_delete.append(next_row["id"])
+                    count += 1
+                    last_time = next_time
+                    j += 1
+
+                # If we merged any events, update the base event
+                if count > 1:
+                    base_data["merged_count"] = count
+                    base_data["duration"] = (last_time - base_time).total_seconds()
+                    to_update.append((json.dumps(base_data), base_row["id"]))
+
+                i = j
+
+            # Apply updates
+            for data, event_id in to_update:
+                conn.execute("UPDATE events SET data = ? WHERE id = ?", (data, event_id))
+
+            # Delete merged events
+            for event_id in to_delete:
+                conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+                merged_count += 1
+
+            return merged_count
+
+    def compact(self, pulsetime: float = 30.0) -> dict[str, int]:
+        """Compact the database by merging events and cleaning up.
+
+        Returns dict with counts of actions taken.
+        """
+        results = {
+            "events_merged": self.merge_events(pulsetime),
+        }
+
+        # Vacuum the database to reclaim space
+        with self._get_connection() as conn:
+            conn.execute("VACUUM")
+
+        return results

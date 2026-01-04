@@ -270,6 +270,242 @@ def hotkey() -> None:
     run_hotkey_daemon()
 
 
+@app.command()
+def sessions() -> None:
+    """List all recorded sessions."""
+    db = get_db()
+    all_sessions = db.get_all_sessions(limit=20)
+
+    if not all_sessions:
+        console.print("[dim]No sessions found[/dim]")
+        return
+
+    table = Table(title="Sessions")
+    table.add_column("ID", style="cyan")
+    table.add_column("Started")
+    table.add_column("Ended")
+    table.add_column("Mode")
+    table.add_column("Status")
+
+    for s in all_sessions:
+        status = "[green]active[/green]" if s.end_time is None else "[dim]ended[/dim]"
+        end = s.end_time[:19] if s.end_time else "-"
+        table.add_row(
+            s.id[:8] + "...",
+            s.start_time[:19],
+            end,
+            str(s.mode),
+            status,
+        )
+
+    console.print(table)
+
+
+@app.command()
+def stats() -> None:
+    """Show database statistics."""
+    db = get_db()
+    stats = db.get_stats()
+
+    table = Table(title="Database Statistics")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Count", justify="right")
+
+    table.add_row("Sessions", str(stats["sessions"]))
+    table.add_row("Total Events", str(stats["events"]))
+    table.add_row("Screenshots", str(stats["screenshots"]))
+
+    console.print(table)
+
+    if stats["event_breakdown"]:
+        console.print("\n[bold]Event Breakdown:[/bold]")
+        for event_type, count in sorted(stats["event_breakdown"].items(), key=lambda x: -x[1]):
+            console.print(f"  {event_type}: {count}")
+
+
+@app.command()
+def delete(
+    before: Optional[str] = typer.Option(
+        None, "--before", help="Delete events before this date (YYYY-MM-DD)"
+    ),
+    app_name: Optional[str] = typer.Option(
+        None, "--app", help="Delete events from this app"
+    ),
+    event_type: Optional[str] = typer.Option(
+        None, "--type", help="Delete events of this type (click, text, window_change, etc.)"
+    ),
+    session_id: Optional[str] = typer.Option(
+        None, "--session", help="Delete a specific session and all its data"
+    ),
+    url_pattern: Optional[str] = typer.Option(
+        None, "--url", help="Delete window events matching this URL pattern"
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Skip confirmation prompt"
+    ),
+) -> None:
+    """Delete events from the database.
+
+    Examples:
+        peer delete --before 2024-01-01
+        peer delete --app "1Password"
+        peer delete --type click
+        peer delete --session abc12345
+        peer delete --url "privatesite.com"
+    """
+    db = get_db()
+
+    if not any([before, app_name, event_type, session_id, url_pattern]):
+        console.print("[red]Specify at least one filter: --before, --app, --type, --session, or --url[/red]")
+        raise typer.Exit(1)
+
+    # Build description of what will be deleted
+    descriptions = []
+    if before:
+        descriptions.append(f"events before {before}")
+    if app_name:
+        descriptions.append(f"events from app '{app_name}'")
+    if event_type:
+        descriptions.append(f"events of type '{event_type}'")
+    if session_id:
+        descriptions.append(f"session {session_id[:8]}... and all its data")
+    if url_pattern:
+        descriptions.append(f"window events matching URL '{url_pattern}'")
+
+    if not force:
+        console.print(f"[yellow]This will delete: {', '.join(descriptions)}[/yellow]")
+        if not typer.confirm("Are you sure?"):
+            console.print("[dim]Cancelled[/dim]")
+            raise typer.Exit(0)
+
+    total_deleted = 0
+
+    if before:
+        count = db.delete_events_before(before)
+        console.print(f"Deleted {count} events before {before}")
+        total_deleted += count
+
+    if app_name:
+        count = db.delete_events_by_app(app_name)
+        console.print(f"Deleted {count} events from '{app_name}'")
+        total_deleted += count
+
+    if event_type:
+        count = db.delete_events_by_type(event_type)
+        console.print(f"Deleted {count} events of type '{event_type}'")
+        total_deleted += count
+
+    if session_id:
+        if db.delete_session(session_id):
+            console.print(f"Deleted session {session_id[:8]}...")
+        else:
+            console.print(f"[yellow]Session {session_id[:8]}... not found[/yellow]")
+
+    if url_pattern:
+        count = db.delete_events_matching_url(url_pattern)
+        console.print(f"Deleted {count} events matching URL '{url_pattern}'")
+        total_deleted += count
+
+    console.print(f"[green]Done. Total events deleted: {total_deleted}[/green]")
+
+
+@app.command()
+def redact(
+    pattern: str = typer.Argument(..., help="Regex pattern to match text to redact"),
+    replacement: str = typer.Option(
+        "[REDACTED]", "--replacement", "-r", help="Replacement text"
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Skip confirmation prompt"
+    ),
+) -> None:
+    """Redact sensitive text from events.
+
+    Searches text events for the given pattern and replaces matches.
+
+    Examples:
+        peer redact "api_key_[a-zA-Z0-9]+"
+        peer redact "password123" --replacement "****"
+        peer redact "secret-\\w+" -f
+    """
+    db = get_db()
+
+    if not force:
+        console.print(f"[yellow]This will redact text matching pattern: {pattern}[/yellow]")
+        if not typer.confirm("Are you sure?"):
+            console.print("[dim]Cancelled[/dim]")
+            raise typer.Exit(0)
+
+    count = db.redact_text_matching(pattern, replacement)
+    console.print(f"[green]Redacted {count} text events[/green]")
+
+
+@app.command()
+def compact(
+    pulsetime: float = typer.Option(
+        30.0, "--pulsetime", "-p", help="Max seconds between events to merge"
+    ),
+) -> None:
+    """Compact the database by merging similar events.
+
+    Merges consecutive click events within the pulsetime window,
+    reducing storage while preserving activity information.
+
+    Inspired by ActivityWatch's heartbeat merging pattern.
+    """
+    db = get_db()
+
+    console.print("[dim]Compacting database...[/dim]")
+    before_stats = db.get_stats()
+
+    results = db.compact(pulsetime)
+
+    after_stats = db.get_stats()
+    saved = before_stats["events"] - after_stats["events"]
+
+    console.print(f"[green]Merged {results['events_merged']} click events[/green]")
+    console.print(f"[dim]Events: {before_stats['events']} → {after_stats['events']} ({saved} saved)[/dim]")
+
+
+@app.command()
+def blocklist(
+    add: Optional[str] = typer.Option(None, "--add", "-a", help="Add an app to blocklist"),
+    remove: Optional[str] = typer.Option(None, "--remove", "-r", help="Remove an app from blocklist"),
+) -> None:
+    """Manage the app blocklist.
+
+    Blocked apps are never logged, providing privacy for sensitive applications.
+
+    Examples:
+        peer blocklist                  # Show current blocklist
+        peer blocklist --add "Slack"    # Block Slack
+        peer blocklist --remove "Slack" # Unblock Slack
+    """
+    config = get_config()
+
+    if add:
+        config.block_app(add)
+        console.print(f"[green]Added '{add}' to blocklist[/green]")
+    elif remove:
+        config.unblock_app(remove)
+        console.print(f"[green]Removed '{remove}' from blocklist[/green]")
+
+    # Show current blocklist
+    console.print("\n[bold]Blocked Apps:[/bold]")
+    for app in sorted(config.blocked_apps):
+        console.print(f"  - {app}")
+
+    if config.blocked_bundles - {
+        "com.1password.1password", "com.apple.keychainaccess",
+        "com.lastpass.LastPass", "com.bitwarden.desktop", "com.dashlane.Dashlane"
+    }:
+        console.print("\n[bold]Blocked Bundle IDs:[/bold]")
+        for bundle in sorted(config.blocked_bundles):
+            console.print(f"  - {bundle}")
+
+    console.print(f"\n[dim]Blocklist saved to: {config.data_dir / 'blocklist.json'}[/dim]")
+
+
 def _format_duration(start_time: str) -> str:
     """Format duration from start time to now."""
     start = datetime.fromisoformat(start_time)

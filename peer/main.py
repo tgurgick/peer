@@ -15,7 +15,8 @@ from rich.table import Table
 
 from peer.capture import CaptureReason, SmartScreenshotManager
 from peer.config import Config, get_config
-from peer.logger import KeyboardLogger, MouseLogger, WindowLogger
+from peer.logger import AFKDetector, KeyboardLogger, MouseLogger, WindowLogger
+from peer.logger.afk import AFKEvent
 from peer.logger.keyboard import CommandEvent, KeyboardEvent, TextEvent
 from peer.storage import Database, Event, Screenshot, Session
 
@@ -39,7 +40,12 @@ class EventCoordinator:
         self._verbose_callback = verbose_callback
 
         # Initialize window logger first (needed by keyboard logger)
-        self.window_logger = WindowLogger(on_event=self._on_window_event)
+        # Pass blocklist for privacy filtering
+        self.window_logger = WindowLogger(
+            on_event=self._on_window_event,
+            blocked_apps=config.blocked_apps,
+            blocked_bundles=config.blocked_bundles,
+        )
 
         # Initialize other loggers
         self.keyboard_logger = KeyboardLogger(
@@ -47,6 +53,12 @@ class EventCoordinator:
             get_active_window=self.window_logger.get_active_window,
         )
         self.mouse_logger = MouseLogger(on_event=self._on_mouse_event)
+
+        # Initialize AFK detector
+        self.afk_detector = AFKDetector(
+            on_status_change=self._on_afk_event,
+            afk_threshold=float(config.afk_timeout),
+        )
 
         # Event counters for display
         self._event_counts = {
@@ -57,6 +69,7 @@ class EventCoordinator:
             "screenshot": 0,
             "session_start": 0,
             "session_stop": 0,
+            "afk_status": 0,
         }
         self._lock = threading.Lock()
         self._running = False
@@ -77,6 +90,7 @@ class EventCoordinator:
         self.window_logger.start()
         self.keyboard_logger.start()
         self.mouse_logger.start()
+        self.afk_detector.start()
 
         # Start smart screenshot capture if mode >= 2
         if self.session.mode >= 2:
@@ -94,6 +108,7 @@ class EventCoordinator:
         self.keyboard_logger.stop()
         self.mouse_logger.stop()
         self.window_logger.stop()
+        self.afk_detector.stop()
 
         if self._screenshot_manager:
             self._screenshot_manager.stop()
@@ -130,6 +145,23 @@ class EventCoordinator:
         if self._verbose_callback:
             window_info = {"app": "peer", "title": "Session Lifecycle"}
             self._verbose_callback(event_type, timestamp, event_data, window_info)
+
+    def _on_afk_event(self, event: AFKEvent) -> None:
+        """Handle AFK status change events."""
+        with self._lock:
+            self._event_counts["afk_status"] += 1
+
+        db_event = Event(
+            timestamp=event.timestamp,
+            event_type="afk_status",
+            data=event.to_dict(),
+            session_id=self.session.id,
+        )
+        self.db.add_event(db_event)
+
+        if self._verbose_callback:
+            window_info = {"app": "peer", "title": "AFK Detection"}
+            self._verbose_callback("afk_status", event.timestamp, event.to_dict(), window_info)
 
     def _on_keyboard_event(self, event: KeyboardEvent) -> None:
         """Handle keyboard events (text or command)."""
@@ -374,6 +406,14 @@ def _format_event(
         stats = data.get("stats", {})
         stats_str = f"text={stats.get('text', 0)} cmd={stats.get('command', 0)} clicks={stats.get('click', 0)} windows={stats.get('window_change', 0)}"
         return f"[dim]{time_str}[/dim] [bold red]■ SESSION STOP[/bold red]  id={session_id}... {stats_str}"
+
+    elif event_type == "afk_status":
+        status = data.get("status", "unknown")
+        idle_secs = data.get("idle_seconds", 0)
+        if status == "afk":
+            return f"[dim]{time_str}[/dim] [yellow]💤 AFK[/yellow]          idle for {idle_secs:.0f}s"
+        else:
+            return f"[dim]{time_str}[/dim] [green]👋 ACTIVE[/green]       back after {idle_secs:.0f}s"
 
     return f"[dim]{time_str}[/dim] {app} {location} [{event_type}] {data}"
 

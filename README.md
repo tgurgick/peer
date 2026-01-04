@@ -18,15 +18,23 @@ Peer monitors on-screen activity and stores it locally for use as context for AI
 | **Document Paths** | File path when in TextEdit, Preview, Finder, Word, Excel | `~/Documents/notes.txt` |
 | **Screenshots** | Full screen captures (mode 2+) | PNG images at strategic moments |
 | **Session Events** | Start/stop timestamps with activity stats | Session boundaries |
+| **AFK Status** | Away-from-keyboard detection | `afk` after 3min idle, `active` on return |
 
-### Privacy Filtering
+### Privacy Features
 
-Peer attempts to mask sensitive input:
-- Password fields (detected by window title containing "password", "login", etc.)
-- Input in apps like Keychain Access, 1Password, banking apps
-- Content is masked as `****` in these contexts
+- **App Blocklist**: Password managers (1Password, Keychain, etc.) are blocked by default
+- **Incognito Detection**: Private browsing windows skip URL capture
+- **Sensitive Context Masking**: Password fields show `****` instead of actual input
+- **Data Management**: Delete or redact events after capture
 
-**However**: This filtering is not foolproof. Sensitive data may still be captured if the context detection fails.
+Manage blocked apps:
+```bash
+peer blocklist                  # Show blocked apps
+peer blocklist --add "Slack"    # Block an app
+peer blocklist --remove "Slack" # Unblock an app
+```
+
+**Note**: Privacy filtering is not foolproof. Sensitive data may still be captured if context detection fails.
 
 ## Installation
 
@@ -51,6 +59,14 @@ peer export
 
 # Toggle monitoring with global hotkey
 peer hotkey  # Then use Shift+Backspace+Left to toggle
+
+# Data management
+peer stats                      # Show database statistics
+peer sessions                   # List all sessions
+peer delete --before 2024-01-01 # Delete old events
+peer delete --app "1Password"   # Delete events from an app
+peer redact "password123"       # Redact sensitive text
+peer compact                    # Merge redundant events
 ```
 
 ## Operating Modes
@@ -84,6 +100,17 @@ All data stored locally in `~/.peer/`:
 
 - Python 3.9+
 - macOS (uses Quartz and AppKit for screen/window access)
+
+## Acknowledgements
+
+Several features in Peer were inspired by [ActivityWatch](https://activitywatch.net/), an excellent open-source time tracker (MPL-2.0 license):
+
+- **AFK Detection**: Idle state tracking based on system input activity
+- **Heartbeat/Merge Pattern**: Combining consecutive similar events to reduce storage
+- **Incognito Detection**: Respecting browser private mode
+- **Data Management**: User control over deletion and retention
+
+ActivityWatch focuses on productivity analytics ("how much time on X?") while Peer captures detailed activity for LLM context. They complement each other well.
 
 ## License
 
