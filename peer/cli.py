@@ -264,7 +264,7 @@ def version() -> None:
 
 @app.command()
 def hotkey() -> None:
-    """Run hotkey daemon to toggle monitoring with Shift+Backspace+Left."""
+    """Run hotkey daemon to toggle monitoring with Ctrl+Shift+Left."""
     from peer.hotkey import run_hotkey_daemon
 
     run_hotkey_daemon()

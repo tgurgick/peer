@@ -58,7 +58,7 @@ peer stop
 peer export
 
 # Toggle monitoring with global hotkey
-peer hotkey  # Then use Shift+Backspace+Left to toggle
+peer hotkey  # Then use Ctrl+Shift+Left to toggle
 
 # Data management
 peer stats                      # Show database statistics

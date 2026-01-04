@@ -18,8 +18,8 @@ console = Console()
 class HotkeyListener:
     """Listens for global hotkey to toggle peer monitoring."""
 
-    # Default hotkey: Shift + Backspace + Left Arrow
-    HOTKEY_KEYS = {keyboard.Key.shift, keyboard.Key.backspace, keyboard.Key.left}
+    # Default hotkey: Ctrl + Shift + Left Arrow
+    HOTKEY_KEYS = {keyboard.Key.ctrl, keyboard.Key.shift, keyboard.Key.left}
 
     def __init__(self):
         self._listener: Optional[keyboard.Listener] = None
@@ -48,7 +48,7 @@ class HotkeyListener:
 
         status = "[green]active[/green]" if self._monitoring_active else "[dim]inactive[/dim]"
         console.print(f"[cyan]Peer hotkey daemon started[/cyan]")
-        console.print(f"  Hotkey: [bold]Shift + Backspace + Left Arrow[/bold]")
+        console.print(f"  Hotkey: [bold]Ctrl + Shift + Left Arrow[/bold]")
         console.print(f"  Current status: {status}")
         console.print(f"  Press hotkey to toggle monitoring")
         console.print(f"  Press Ctrl+C to exit daemon")
